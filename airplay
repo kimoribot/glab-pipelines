@@ -1,0 +1,66 @@
+#!/bin/bash
+# airplay - Control AirPlay / Screen Mirroring on macOS
+# Usage: airplay [device_name|off|list|menu]
+
+set -e
+
+show_help() {
+    cat <<EOF
+airplay - Control AirPlay / Screen Mirroring
+
+Usage:
+  airplay [device]    Connect to device (e.g., 'airplay bedroom')
+  airplay off        Disconnect from AirPlay
+  airplay list       List available AirPlay devices
+  airplay menu       Open Screen Mirroring settings
+  airplay help       Show this help
+
+Examples:
+  airplay bedroom    Connect to Bedroom Apple TV
+  airplay off        Turn off AirPlay
+  airplay            Open Screen Mirroring menu
+EOF
+}
+
+# Open Screen Mirroring in System Settings
+open_screen_mirroring() {
+    open "x-apple.systempreferences:com.apple.display-extensions-settings" 2>/dev/null || \
+    open "x-apple.systempreferences:displays" 2>/dev/null || \
+    open "x-apple.systempreferences:"
+}
+
+# List available AirPlay devices
+list_devices() {
+    echo "Searching for AirPlay devices..."
+    dns-sd -B _airplay._tcp . 2>/dev/null | grep -v "DATE\|Timestamp\| STARTING" | head -10
+}
+
+# Main
+case "$1" in
+    help|--help|-h)
+        show_help
+        exit 0
+        ;;
+    list|ls)
+        list_devices
+        exit 0
+        ;;
+    menu|settings)
+        open_screen_mirroring
+        exit 0
+        ;;
+    off|disable|disconnect)
+        open_screen_mirroring
+        echo "Select 'Turn AirPlay Off'"
+        exit 0
+        ;;
+    ""|menu)
+        open_screen_mirroring
+        exit 0
+        ;;
+    *)
+        open_screen_mirroring
+        echo "Select '$1' from the list"
+        exit 0
+        ;;
+esac
