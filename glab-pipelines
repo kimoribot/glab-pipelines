@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # glab-pipelines - Browse and open GitLab pipelines from terminal
-# Usage: glab-pipelines [gitlab-url] [--branch | --all]
+# Usage: glab-pipelines [gitlab-url] [--branch|--all] [--cloudbees]
 #   or: glab-pipelines gitlab.mycompany.com
 
 set -e
@@ -13,11 +13,12 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # Parse args
-MODE="branch"  # default to current branch
+MODE="branch"
 CUSTOM_GITLAB_URL=""
+CLOUDBEES=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -29,12 +30,20 @@ while [[ $# -gt 0 ]]; do
             MODE="branch"
             shift
             ;;
+        --cloudbees|-c)
+            CLOUDBEES=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: glab-pipelines [gitlab-url] [--branch|--all]"
+            echo "Usage: glab-pipelines [gitlab-url] [options]"
             echo ""
             echo "Args:"
             echo "  --branch    Show pipelines for current branch only (default)"
             echo "  --all       Show all pipelines for the project"
+            echo "  --cloudbees Open CloudBees links instead of GitLab"
+            echo "  -h, --help  Show this help"
+            echo ""
+            echo "Token: Uses GITLAB_TOKEN env var, or reads from macOS Keychain"
             exit 0
             ;;
         -*)
@@ -48,13 +57,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Get token
+# Get token from keychain or env var
 get_token() {
     local token="${GITLAB_TOKEN:-${GLAB_TOKEN:-}}"
+    
     if [[ -z "$token" ]]; then
-        echo -e "${RED}Error: GITLAB_TOKEN or GLAB_TOKEN not set${NC}"
-        echo "Set it with: export GITLAB_TOKEN=your_token"
-        echo "Get a token at: https://gitlab.com/-/profile/personal_access_tokens"
+        token=$(security find-internet-password -s gitlab.example.com 2>/dev/null | grep "password" | cut -d'"' -f4 || true)
+    fi
+    
+    if [[ -z "$token" ]]; then
+        echo -e "${RED}Error: GITLAB_TOKEN not set and no keychain entry found${NC}"
+        echo "Set token with: export GITLAB_TOKEN=your_token"
         exit 1
     fi
     echo "$token"
@@ -75,7 +88,6 @@ get_repo() {
         exit 1
     fi
     
-    # Parse git@host:owner/repo.git or https://host/owner/repo.git
     if [[ "$remote" =~ git@([^:]+):([^/]+)/(.+)\.git$ ]]; then
         host="${BASH_REMATCH[1]}"
         owner="${BASH_REMATCH[2]}"
@@ -89,7 +101,6 @@ get_repo() {
         exit 1
     fi
     
-    # Override host if custom URL provided
     if [[ -n "$CUSTOM_GITLAB_URL" ]]; then
         host="${CUSTOM_GITLAB_URL#https://}"
         host="${CUSTOM_GITLAB_URL#http://}"
@@ -99,20 +110,6 @@ get_repo() {
     echo "$host $owner $repo"
 }
 
-# Get pipeline status color for fzf
-get_status_color() {
-    case "$1" in
-        success) echo "green" ;;
-        failed) echo "red" ;;
-        running) echo "blue" ;;
-        pending) echo "yellow" ;;
-        canceled) echo "yellow" ;;
-        skipped) echo "white" ;;
-        *) echo "white" ;;
-    esac
-}
-
-# Get pipeline status icon
 get_status_icon() {
     case "$1" in
         success) echo "✓" ;;
@@ -126,7 +123,18 @@ get_status_icon() {
     esac
 }
 
-# Fetch pipelines
+get_status_color() {
+    case "$1" in
+        success) echo "green" ;;
+        failed) echo "red" ;;
+        running) echo "blue" ;;
+        pending) echo "yellow" ;;
+        canceled) echo "yellow" ;;
+        skipped) echo "white" ;;
+        *) echo "white" ;;
+    esac
+}
+
 fetch_pipelines() {
     local host="$1"
     local owner="$2"
@@ -140,7 +148,6 @@ fetch_pipelines() {
     
     local url="${api_url}/projects/${project_path//\//%2F}/pipelines?per_page=${limit}"
     
-    # Filter by branch if specified
     if [[ -n "$branch" ]]; then
         url+="&ref=${branch}"
     fi
@@ -148,15 +155,44 @@ fetch_pipelines() {
     curl -s -H "PRIVATE-TOKEN: $token" "$url" 2>/dev/null
 }
 
-# Main
+fetch_cloudbees_links() {
+    local host="$1"
+    local owner="$2"
+    local repo="$3"
+    local token="$4"
+    local pipeline_id="$5"
+    
+    local api_url="https://${host}/api/v4"
+    local project_path="${owner}/${repo}"
+    
+    local jobs
+    jobs=$(curl -s -H "PRIVATE-TOKEN: $token" \
+        "${api_url}/projects/${project_path//\//%2F}/pipelines/${pipeline_id}/jobs?per_page=50" 2>/dev/null)
+    
+    if [[ -z "$jobs" ]] || [[ "$jobs" == "[]" ]]; then
+        return
+    fi
+    
+    while IFS= read -r job; do
+        local job_id
+        job_id=$(echo "$job" | jq -r '.id // empty')
+        
+        [[ -z "$job_id" ]] && continue
+        
+        local trace
+        trace=$(curl -s -H "PRIVATE-TOKEN: $token" \
+            "${api_url}/projects/${project_path//\//%2F}/jobs/${job_id}/trace" 2>/dev/null | head -500)
+        
+        echo "$trace" | grep -oE 'https?://[^]"<>]+\.cloudbees\.com[^]"<>*' | sort -u
+    done < <(echo "$jobs" | jq -c '.[]')
+}
+
 main() {
     local token
     token=$(get_token)
     
-    # Get repo info
     read -r host owner repo <<< "$(get_repo)"
     
-    # Get current branch if in branch mode
     local branch=""
     if [[ "$MODE" == "branch" ]]; then
         branch=$(get_current_branch)
@@ -165,14 +201,10 @@ main() {
     echo -e "${BLUE}${BOLD}GitLab Pipeline Browser${NC}"
     echo -e "${CYAN}Repo:${NC} ${owner}/${repo}"
     echo -e "${CYAN}Host:${NC} ${host}"
-    if [[ -n "$branch" ]]; then
-        echo -e "${CYAN}Branch:${NC} ${branch}"
-    else
-        echo -e "${CYAN}Mode:${NC} all pipelines"
-    fi
+    [[ -n "$branch" ]] && echo -e "${CYAN}Branch:${NC} ${branch}" || echo -e "${CYAN}Mode:${NC} all pipelines"
+    [[ "$CLOUDBEES" == "true" ]] && echo -e "${MAGENTA}CloudBees mode enabled${NC}"
     echo ""
     
-    # Fetch pipelines
     local pipelines
     pipelines=$(fetch_pipelines "$host" "$owner" "$repo" "$token" "$branch" 30)
     
@@ -190,7 +222,6 @@ main() {
         exit 1
     fi
     
-    # Build fzf input with ANSI colors for fzf
     local fzf_entries=""
     while IFS= read -r line; do
         local id status ref created_at web_url
@@ -202,9 +233,8 @@ main() {
         
         ref="${ref:0:35}"
         
-        # Format date
+        local date
         if [[ -n "$created_at" ]]; then
-            local date
             date=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$created_at" "+%m/%d %H:%M" 2>/dev/null || echo "${created_at:0:16}")
         else
             date="--/-- --:--"
@@ -214,18 +244,24 @@ main() {
         icon=$(get_status_icon "$status")
         color=$(get_status_color "$status")
         
-        # ANSI colored entry for fzf (it parses ANSI codes)
-        # Format: [status_icon #id | branch | date | status]
-        printf -v entry "%s ${GREEN}#%s${NC} | ${CYAN}%s${NC} | %s | ${!color}%s${NC}" \
-            "$icon" "$id" "$ref" "$date" "$status"
+        local extra=""
+        if [[ "$CLOUDBEES" == "true" ]]; then
+            local cb_links
+            cb_links=$(fetch_cloudbees_links "$host" "$owner" "$repo" "$token" "$id")
+            if [[ -n "$cb_links" ]]; then
+                echo "$cb_links" > "/tmp/cb_${id}.txt"
+                extra=" | $(echo "$cb_links" | head -1)"
+            else
+                extra=" | (no cloudbees links)"
+            fi
+        fi
         
-        # Append URL as hidden field (last field after |)
-        entry="${entry} | ${web_url}"
+        printf -v entry "%s ${GREEN}#%s${NC} | ${CYAN}%s${NC} | %s | ${!color}%s${NC}%s | %s" \
+            "$icon" "$id" "$ref" "$date" "$status" "$extra" "$web_url"
         
         fzf_entries+="$entry"$'\n'
     done < <(echo "$pipelines" | jq -c '.[]')
     
-    # Run fzf with color support
     local selected
     selected=$(echo "$fzf_entries" | FZF_DEFAULT_OPTS="--color=fg:-1" fzf \
         --prompt="Select pipeline: " \
@@ -236,13 +272,32 @@ main() {
         --reverse \
         --ansi)
     
-    if [[ -z "$selected" ]]; then
-        exit 0
-    fi
+    [[ -z "$selected" ]] && exit 0
     
-    # Extract URL (last field after last |)
     local url
     url=$(echo "$selected" | sed 's/.*| //')
+    
+    if [[ "$CLOUDBEES" == "true" ]]; then
+        local pipeline_id
+        pipeline_id=$(echo "$selected" | grep -oP '#\K[0-9]+' | head -1)
+        
+        if [[ -n "$pipeline_id" ]] && [[ -f "/tmp/cb_${pipeline_id}.txt" ]]; then
+            local cb_links link_count
+            cb_links=$(cat "/tmp/cb_${pipeline_id}.txt" | sort -u)
+            link_count=$(echo "$cb_links" | grep -c . || echo 0)
+            
+            if [[ "$link_count" -gt 1 ]]; then
+                echo -e "${CYAN}Multiple CloudBees links found:${NC}"
+                local chosen_link
+                chosen_link=$(echo "$cb_links" | fzf --prompt="Select CloudBees link: " --height=15 --reverse)
+                [[ -n "$chosen_link" ]] && url="$chosen_link"
+            elif [[ "$link_count" -eq 1 ]]; then
+                url=$(echo "$cb_links" | head -1)
+            fi
+            
+            rm -f "/tmp/cb_${pipeline_id}.txt"
+        fi
+    fi
     
     echo -e "${GREEN}→ Opening:${NC} $url"
     open "$url"
