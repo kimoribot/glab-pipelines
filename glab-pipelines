@@ -235,21 +235,27 @@ watch_pipeline() {
     echo -e "${YELLOW}Watching pipeline #${pipeline_id}... Press Ctrl-C to stop${NC}"
     
     while true; do
-        local status
-        status=$(curl -s -H "PRIVATE-TOKEN: $token" \
-            "${api_url}/projects/${project_path//\//%2F}/pipelines/${pipeline_id}" | \
-            jq -r '.status // "unknown"')
+        local response
+        response=$(curl -s -H "PRIVATE-TOKEN: $token" \
+            "${api_url}/projects/${project_path//\//%2F}/pipelines/${pipeline_id}")
+        
+        local status web_url
+        status=$(echo "$response" | jq -r '.status // "unknown"')
+        web_url=$(echo "$response" | jq -r '.web_url // ""')
         
         if [[ "$status" == "success" ]]; then
-            osascript -e 'display notification "Pipeline #'"$pipeline_id"' succeeded!" with title "GitLab Pipeline"'
+            osascript -e 'display notification "Pipeline #'"$pipeline_id"' succeeded!" with title "GitLab Pipeline" sound name "Glass"' \
+                -e "open location \"$web_url\""
             echo -e "${GREEN}✓ Pipeline #${pipeline_id} succeeded!${NC}"
             break
         elif [[ "$status" == "failed" ]]; then
-            osascript -e 'display notification "Pipeline #'"$pipeline_id"' failed!" with title "GitLab Pipeline"'
+            osascript -e 'display notification "Pipeline #'"$pipeline_id"' failed!" with title "GitLab Pipeline" sound name "Basso"' \
+                -e "open location \"$web_url\""
             echo -e "${RED}✗ Pipeline #${pipeline_id} failed!${NC}"
             break
         elif [[ "$status" == "canceled" ]]; then
-            osascript -e 'display notification "Pipeline #'"$pipeline_id"' was canceled!" with title "GitLab Pipeline"'
+            osascript -e 'display notification "Pipeline #'"$pipeline_id"' was canceled!" with title "GitLab Pipeline"' \
+                -e "open location \"$web_url\""
             echo -e "${YELLOW}⊘ Pipeline #${pipeline_id} canceled${NC}"
             break
         elif [[ "$status" == "running" ]]; then
