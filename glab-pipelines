@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --all       Show all pipelines for the project"
             echo "  --cloudbees Open CloudBees links instead of GitLab"
             echo "  --diff      Show git diff in preview"
-            echo "  --watch ID  Poll pipeline (or Ctrl-W in fzf to watch selected)"
+            echo "  --watch      Watch pipeline (ID or Ctrl-W in fzf)"
             echo "  -h, --help  Show this help"
             echo ""
             echo "Token: Uses GITLAB_TOKEN env var, or reads from macOS Keychain"
@@ -269,7 +269,8 @@ watch_pipeline() {
 }
 
 main() {
-    # If watch mode, skip the interactive part
+    # If watch mode with no ID, flag to watch after selection
+    local WATCH_AFTER_SELECT=false
     if [[ -n "$WATCH_PIPELINE" ]]; then
         read -r host owner repo <<< "$(get_repo)"
         local token
@@ -277,6 +278,13 @@ main() {
         watch_pipeline "$WATCH_PIPELINE" "$host" "$owner" "$repo" "$token"
         exit 0
     fi
+    
+    # Check if --watch flag was passed without ID (for interactive selection)
+    for arg in "$@"; do
+        if [[ "$arg" == "--watch" ]]; then
+            WATCH_AFTER_SELECT=true
+        fi
+    done
     
     read -r host owner repo <<< "$(get_repo)"
     
@@ -378,8 +386,10 @@ main() {
     
     # Add Ctrl-W to watch selected pipeline
     fzf_opts+=(
-        --bind="ctrl-w:execute-silent(bash ~/Projects/glab-pipelines --watch {+})"
+        --bind="ctrl-w:execute(echo WATCH_ME:{} > /tmp/ci_watch)+abort"
     )
+    
+    local selected
     
     local selected
     selected=$(echo "$fzf_entries" | fzf "${fzf_opts[@]}")
@@ -409,6 +419,15 @@ main() {
             
             rm -f "/tmp/cb_${pipeline_id}.txt"
         fi
+    fi
+    
+    # If watch flag was passed interactively, watch instead of open
+    if [[ "$WATCH_AFTER_SELECT" == "true" ]]; then
+        local watch_id
+        watch_id=$(echo "$selected" | grep -oP '#\K[0-9]+' | head -1)
+        echo -e "${YELLOW}Starting watch on pipeline #${watch_id}...${NC}"
+        watch_pipeline "$watch_id" "$host" "$owner" "$repo" "$token"
+        exit 0
     fi
     
     echo -e "${GREEN}→ Opening:${NC} $url"
