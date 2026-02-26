@@ -305,7 +305,7 @@ main() {
     if [[ "$DIFF_MODE" == "true" ]]; then
         # Preview with diff stats
         fzf_opts+=(
-            --preview="echo {} | grep -oP '#\K[0-9]+' | head -1 | xargs -I{} sh -c 'git diff --stat 2>/dev/null | head -20 || echo \"No diff\"'"
+            --preview="echo {} | grep -oP '#\K[0-9]+' | head -1 | xargs -I{} sh -c 'git log --oneline -5 2>/dev/null | head -20 || echo \"No diff\"'"
         )
     fi
     
