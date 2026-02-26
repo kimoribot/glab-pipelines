@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# glab-pipelines - Browse and open GitLab pipelines from terminal
+# Usage: glab-pipelines [gitlab-url]
+#   or: glab-pipelines https://gitlab.mycompany.com
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Get custom GitLab URL from args
+CUSTOM_GITLAB_URL="${1:-}"
+
+# Get token
+get_token() {
+    local token="${GITLAB_TOKEN:-${GLAB_TOKEN:-}}"
+    if [[ -z "$token" ]]; then
+        echo -e "${RED}Error: GITLAB_TOKEN or GLAB_TOKEN not set${NC}"
+        echo "Set it with: export GITLAB_TOKEN=your_token"
+        echo "Get a token at: https://gitlab.com/-/profile/personal_access_tokens"
+        exit 1
+    fi
+    echo "$token"
+}
+
+# Get repo info from git
+get_repo() {
+    local remote
+    remote=$(git remote get-url origin 2>/dev/null || git remote -v 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    
+    if [[ -z "$remote" ]]; then
+        echo -e "${RED}Error: No git remote found${NC}"
+        exit 1
+    fi
+    
+    # Parse git@host:owner/repo.git or https://host/owner/repo.git
+    if [[ "$remote" =~ git@([^:]+):([^/]+)/(.+)\.git$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        owner="${BASH_REMATCH[2]}"
+        repo="${BASH_REMATCH[3]}"
+    elif [[ "$remote" =~ https?://([^/]+)/([^/]+)/(.+?)(\.git)?$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        owner="${BASH_REMATCH[2]}"
+        repo="${BASH_REMATCH[3]}"
+    else
+        echo -e "${RED}Error: Could not parse git remote: $remote${NC}"
+        exit 1
+    fi
+    
+    # Override host if custom URL provided
+    if [[ -n "$CUSTOM_GITLAB_URL" ]]; then
+        # Strip protocol if provided
+        host="${CUSTOM_GITLAB_URL#https://}"
+        host="${CUSTOM_GITLAB_URL#http://}"
+        host="${host%%/*}"
+    fi
+    
+    echo "$host $owner $repo"
+}
+
+# Get pipeline status icon
+get_status_icon() {
+    case "$1" in
+        success) echo "✓" ;;
+        failed) echo "✗" ;;
+        running) echo "◐" ;;
+        pending) echo "○" ;;
+        canceled) echo "⊘" ;;
+        skipped) echo "⊝" ;;
+        created) echo "◌" ;;
+        *) echo "?" ;;
+    esac
+}
+
+# Get pipeline status color
+get_status_color() {
+    case "$1" in
+        success) echo "$GREEN" ;;
+        failed) echo "$RED" ;;
+        running) echo "$BLUE" ;;
+        pending) echo "$YELLOW" ;;
+        canceled) echo "$YELLOW" ;;
+        skipped) echo "$NC" ;;
+        *) echo "$NC" ;;
+    esac
+}
+
+# Fetch pipelines
+fetch_pipelines() {
+    local host="$1"
+    local owner="$2"
+    local repo="$3"
+    local token="$4"
+    local limit="${5:-50}"
+    
+    local api_url="https://${host}/api/v4"
+    
+    # For nested projects, join owner and repo with %2F
+    local project_path="${owner}/${repo}"
+    
+    curl -s -H "PRIVATE-TOKEN: $token" \
+        "${api_url}/projects/${project_path//\//%2F}/pipelines?per_page=${limit}" 2>/dev/null
+}
+
+# Main
+main() {
+    local token
+    token=$(get_token)
+    
+    # Get repo info
+    read -r host owner repo <<< "$(get_repo)"
+    
+    echo -e "${BLUE}GitLab Pipeline Browser${NC}"
+    echo "Repo: ${owner}/${repo}"
+    echo "Host: ${host}"
+    echo ""
+    
+    # Fetch pipelines
+    local pipelines
+    pipelines=$(fetch_pipelines "$host" "$owner" "$repo" "$token" 30)
+    
+    # Debug: show raw response if it's not JSON
+    if [[ -n "$pipelines" ]] && [[ ! "$pipelines" =~ ^\[ ]]; then
+        echo -e "${YELLOW}API Response: $pipelines${NC}"
+    fi
+    
+    if [[ -z "$pipelines" ]] || [[ "$pipelines" == "[]" ]]; then
+        echo -e "${YELLOW}No pipelines found${NC}"
+        exit 0
+    fi
+    
+    # Check for errors
+    if [[ "$pipelines" =~ \{.*message.*\} ]]; then
+        echo -e "${RED}API Error: $pipelines${NC}"
+        exit 1
+    fi
+    
+    # Build fzf input
+    local fzf_entries=""
+    while IFS= read -r line; do
+        local id status ref created_at web_url
+        id=$(echo "$line" | jq -r '.id // empty')
+        status=$(echo "$line" | jq -r '.status // empty')
+        ref=$(echo "$line" | jq -r '.ref // empty')
+        created_at=$(echo "$line" | jq -r '.created_at // empty')
+        web_url=$(echo "$line" | jq -r '.web_url // empty')
+        
+        # Truncate ref (branch name)
+        ref="${ref:0:40}"
+        
+        # Format date
+        if [[ -n "$created_at" ]]; then
+            local date
+            date=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$created_at" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "$created_at")
+        else
+            date="unknown"
+        fi
+        
+        local icon
+        icon=$(get_status_icon "$status")
+        local color
+        color=$(get_status_color "$status")
+        
+        # Format: icon | id | ref | date | status | url
+        printf -v entry "%s | #%s | %s | %s | %s | %s" \
+            "$icon" "$id" "$ref" "$date" "$status" "$web_url"
+        
+        fzf_entries+="$entry"$'\n'
+    done < <(echo "$pipelines" | jq -c '.[]')
+    
+    # Run fzf
+    local selected
+    selected=$(echo "$fzf_entries" | fzf --prompt="Select pipeline: " \
+        --header="← Select to open in browser | ESC to exit" \
+        --preview-window=hidden \
+        --height=20 \
+        --reverse)
+    
+    if [[ -z "$selected" ]]; then
+        exit 0
+    fi
+    
+    # Extract URL (last field)
+    local url
+    url=$(echo "$selected" | sed 's/.*| //')
+    
+    echo -e "${GREEN}Opening: $url${NC}"
+    open "$url"
+}
+
+main "$@"
