@@ -256,8 +256,14 @@ main() {
             fi
         fi
         
-        printf -v entry "%s ${GREEN}#%s${NC} | ${CYAN}%s${NC} | %s | ${!color}%s${NC}%s | %s" \
-            "$icon" "$id" "$ref" "$date" "$status" "$extra" "$web_url"
+        local id_color
+        if [[ "$status" == "failed" ]]; then
+            id_color="$RED"
+        else
+            id_color="$GREEN"
+        fi
+        printf -v entry "%s %s#%s%s | ${CYAN}%s%s${NC} | %s | ${!color}%s%s%s${NC} | %s" \
+            "$icon" "$id_color" "$id" "$NC" "$ref" "$date" "$status" "$extra" "$web_url"
         
         fzf_entries+="$entry"$'\n'
     done < <(echo "$pipelines" | jq -c '.[]')
@@ -266,7 +272,6 @@ main() {
     selected=$(echo "$fzf_entries" | FZF_DEFAULT_OPTS="--color=fg:-1" fzf \
         --prompt="Select pipeline: " \
         --header="${BOLD}↑↓ navigate${NC} | ${BOLD}ENTER${NC} open | ${BOLD}ESC${NC} exit" \
-        --header-lines=1 \
         --preview-window=hidden \
         --height=20 \
         --reverse \
