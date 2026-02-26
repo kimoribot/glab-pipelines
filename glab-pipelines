@@ -51,7 +51,7 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            CUSTOM_GITLAB_URL="$1"
+            CUSTOM_GITLAB_URL="${1:-$CUSTOM_GITLAB_URL}"
             shift
             ;;
     esac
@@ -84,9 +84,15 @@ get_repo() {
     local remote
     remote=$(git remote get-url origin 2>/dev/null || git remote -v 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     
+    # If no remote but CUSTOM_GITLAB_URL is set, use a default
     if [[ -z "$remote" ]]; then
-        echo -e "${RED}Error: No git remote found${NC}"
-        exit 1
+        if [[ -n "$CUSTOM_GITLAB_URL" ]]; then
+            # Use a placeholder repo since we can't detect it
+            remote="git@${CUSTOM_GITLAB_URL}:unknown/repo.git"
+        else
+            echo -e "${RED}Error: No git remote found${NC}"
+            exit 1
+        fi
     fi
     
     if [[ "$remote" =~ git@([^:]+):([^/]+)/(.+)\.git$ ]]; then
