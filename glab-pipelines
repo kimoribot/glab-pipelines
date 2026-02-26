@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # glab-pipelines - Browse and open GitLab pipelines from terminal
-# Usage: glab-pipelines [gitlab-url] [--branch|--all] [--cloudbees]
-#   or: glab-pipelines gitlab.mycompany.com
+# Usage: glab-pipelines [gitlab-url] [--branch|--all] [--cloudbees] [--diff]
 
 set -e
 
@@ -19,6 +18,7 @@ NC=$'\033[0m'
 MODE="branch"
 CUSTOM_GITLAB_URL=""
 CLOUDBEES=false
+DIFF_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,6 +34,10 @@ while [[ $# -gt 0 ]]; do
             CLOUDBEES=true
             shift
             ;;
+        --diff|-d)
+            DIFF_MODE=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: glab-pipelines [gitlab-url] [options]"
             echo ""
@@ -41,6 +45,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --branch    Show pipelines for current branch only (default)"
             echo "  --all       Show all pipelines for the project"
             echo "  --cloudbees Open CloudBees links instead of GitLab"
+            echo "  --diff      Show git diff in preview (Enter=open, Ctrl-D=view diff)"
             echo "  -h, --help  Show this help"
             echo ""
             echo "Token: Uses GITLAB_TOKEN env var, or reads from macOS Keychain"
@@ -68,26 +73,21 @@ get_token() {
     
     if [[ -z "$token" ]]; then
         echo -e "${RED}Error: GITLAB_TOKEN not set and no keychain entry found${NC}"
-        echo "Set token with: export GITLAB_TOKEN=your_token"
         exit 1
     fi
     echo "$token"
 }
 
-# Get current branch
 get_current_branch() {
     git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main"
 }
 
-# Get repo info from git
 get_repo() {
     local remote
     remote=$(git remote get-url origin 2>/dev/null || git remote -v 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     
-    # If no remote but CUSTOM_GITLAB_URL is set, use a default
     if [[ -z "$remote" ]]; then
         if [[ -n "$CUSTOM_GITLAB_URL" ]]; then
-            # Use a placeholder repo since we can't detect it
             remote="git@${CUSTOM_GITLAB_URL}:unknown/repo.git"
         else
             echo -e "${RED}Error: No git remote found${NC}"
@@ -194,8 +194,23 @@ fetch_cloudbees_links() {
     done < <(echo "$jobs" | jq -c '.[]')
 }
 
+get_diff() {
+    local ref="$1"
+    local current_branch
+    current_branch=$(get_current_branch)
+    
+    # Try to get diff between this ref and main/master
+    local base_branch
+    base_branch=$(git branch --list main master develop 2>/dev/null | head -1 | tr -d ' *' || echo "main")
+    
+    if [[ "$ref" == "$current_branch" ]]; then
+        git diff "$base_branch...HEAD" --stat 2>/dev/null || git diff HEAD~10..HEAD --stat 2>/dev/null || echo "No diff available"
+    else
+        git diff "$base_branch...$ref" --stat 2>/dev/null || git diff "$ref~5..$ref" --stat 2>/dev/null || echo "No diff available"
+    fi
+}
+
 main() {
-    # Get repo info first to know the host
     read -r host owner repo <<< "$(get_repo)"
     
     local token
@@ -210,7 +225,8 @@ main() {
     echo -e "${CYAN}Repo:${NC} ${owner}/${repo}"
     echo -e "${CYAN}Host:${NC} ${host}"
     [[ -n "$branch" ]] && echo -e "${CYAN}Branch:${NC} ${branch}" || echo -e "${CYAN}Mode:${NC} all pipelines"
-    [[ "$CLOUDBEES" == "true" ]] && echo -e "${MAGENTA}CloudBees mode enabled${NC}"
+    [[ "$CLOUDBEES" == "true" ]] && echo -e "${MAGENTA}CloudBees mode${NC}"
+    [[ "$DIFF_MODE" == "true" ]] && echo -e "${MAGENTA}Diff preview enabled${NC}"
     echo ""
     
     local pipelines
@@ -239,13 +255,13 @@ main() {
         created_at=$(echo "$line" | jq -r '.created_at // empty')
         web_url=$(echo "$line" | jq -r '.web_url // empty')
         
-        ref="${ref:0:35}"
+        ref="${ref:0:40}"
         
         local date
         if [[ -n "$created_at" ]]; then
             date=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$created_at" "+%m/%d %H:%M" 2>/dev/null || echo "${created_at:0:16}")
         else
-            date="--/-- --:--"
+            date="--/--"
         fi
         
         local icon color
@@ -260,7 +276,7 @@ main() {
                 echo "$cb_links" > "/tmp/cb_${id}.txt"
                 extra=" | $(echo "$cb_links" | head -1)"
             else
-                extra=" | (no cloudbees links)"
+                extra=" | (no CB)"
             fi
         fi
         
@@ -271,20 +287,30 @@ main() {
             id_color="$GREEN"
         fi
         
-        # Build entry with colors (fzf handles ANSI)
+        # Simplified: just icon, #id, branch, date (no status text)
         local entry
-        entry="${icon} ${id_color}#${id}${NC} | ${CYAN}${ref}${NC} | ${date} | ${!color}${status}${NC}${extra} | ${web_url}"
+        entry="${icon} ${id_color}#${id}${NC} | ${CYAN}${ref}${NC} | ${date}${extra} | ${web_url}"
         
         fzf_entries+="$entry"$'\n'
     done < <(echo "$pipelines" | jq -c '.[]')
     
+    local fzf_opts=(
+        --prompt="Select: "
+        --preview-window=hidden
+        --height=20
+        --reverse
+        --ansi
+    )
+    
+    if [[ "$DIFF_MODE" == "true" ]]; then
+        # Preview with diff stats
+        fzf_opts+=(
+            --preview="echo {} | grep -oP '#\K[0-9]+' | head -1 | xargs -I{} sh -c 'git diff --stat 2>/dev/null | head -20 || echo \"No diff\"'"
+        )
+    fi
+    
     local selected
-    selected=$(echo "$fzf_entries" | FZF_DEFAULT_OPTS="--color=fg:-1" fzf \
-        --prompt="Select pipeline: " \
-        --preview-window=hidden \
-        --height=20 \
-        --reverse \
-        --ansi)
+    selected=$(echo "$fzf_entries" | fzf "${fzf_opts[@]}")
     
     [[ -z "$selected" ]] && exit 0
     
@@ -301,9 +327,9 @@ main() {
             link_count=$(echo "$cb_links" | grep -c . || echo 0)
             
             if [[ "$link_count" -gt 1 ]]; then
-                echo -e "${CYAN}Multiple CloudBees links found:${NC}"
+                echo -e "${CYAN}Multiple CloudBees links:${NC}"
                 local chosen_link
-                chosen_link=$(echo "$cb_links" | fzf --prompt="Select CloudBees link: " --height=15 --reverse)
+                chosen_link=$(echo "$cb_links" | fzf --prompt="Select: " --height=15 --reverse)
                 [[ -n "$chosen_link" ]] && url="$chosen_link"
             elif [[ "$link_count" -eq 1 ]]; then
                 url=$(echo "$cb_links" | head -1)
