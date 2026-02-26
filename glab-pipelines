@@ -59,10 +59,11 @@ done
 
 # Get token from keychain or env var
 get_token() {
+    local host="${1:-gitlab.com}"
     local token="${GITLAB_TOKEN:-${GLAB_TOKEN:-}}"
     
     if [[ -z "$token" ]]; then
-        token=$(security find-internet-password -s gitlab.example.com 2>/dev/null | grep "password" | cut -d'"' -f4 || true)
+        token=$(security find-internet-password -s "$host" 2>/dev/null | grep "password" | cut -d'"' -f4 || true)
     fi
     
     if [[ -z "$token" ]]; then
@@ -188,10 +189,11 @@ fetch_cloudbees_links() {
 }
 
 main() {
-    local token
-    token=$(get_token)
-    
+    # Get repo info first to know the host
     read -r host owner repo <<< "$(get_repo)"
+    
+    local token
+    token=$(get_token "$host")
     
     local branch=""
     if [[ "$MODE" == "branch" ]]; then
