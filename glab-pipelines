@@ -280,8 +280,11 @@ main() {
     fi
     
     # Check if --watch flag was passed without ID (for interactive selection)
-    for arg in "$@"; do
-        if [[ "$arg" == "--watch" ]]; then
+    # We need to check the original args before they get shifted
+    local original_args=("$@")
+    local WATCH_AFTER_SELECT=false
+    for arg in "${original_args[@]}"; do
+        if [[ "$arg" == "--watch" || "$arg" == "-w" ]]; then
             WATCH_AFTER_SELECT=true
         fi
     done
